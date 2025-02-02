@@ -1,0 +1,626 @@
+---
+title: "Projet recherche ISMAG 2020-2021"
+output: html_notebook
+---
+
+# Introduction
+
+Dans ce projet, on s’intéresse -d'un part- analyser l'évolution du taux de la réanimation en France. De l'autre o n'interesse à mesurer l'impact des quelques variables hospitalières, financières et sociale sur cette mesure. Cette analyse va nous permettre aussi de prédire, non seulement la classe de chaque département, mais aussi les carractéristiques de la série chronologique de l'évolution du taux de réanimsation pour chaque département durant la période d'analyse.
+
+Pour cela, on va utiliser deux extensions des méthode d'apprentissage automatique (arbre de décision et forêts aléatoire) ainsi que la méthode de décomposition des données fonctionnelle (séries chronologiques) nommées "Splines".
+
+
+## Librairies utiles
+
+Pour réaliser cette étude, nous avons eu besoin de plusieurs librairie sur R. Notamment la librairie ggplot2 indispensable pour réaliser des graphiques complexes et splintree qui permet d'utiliser des arbres de décision et forêts aléatoires pour trouver des sous-groupes de population où les individus sont représentés par des fonctions.
+
+```{r message=FALSE, warning=FALSE}
+#install.packages("dplyr")
+#install.packages("tidyverse")
+#install.packages("readxl")
+#install.packages("ggplot")
+#install.packages("plotly")
+#install.packages("splinetree")
+#install.packages("FactoMineR")
+#install.packages("factoextra")
+
+library(dplyr)
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+library(plotly)
+library(FactoMineR)
+library(factoextra)
+library(splinetree)
+```
+
+# Ingénierie des données
+
+## Importation des données 
+
+Les données que nous utilisons pour cette analyse changent constamment et nous souhaitions qu'elle prenne en compte les dernières données chaque fois que le code est executé.
+Pour cela nous avons récupéré les donnés directement de leurs sources dans le cloud en utilisant l'importation par URL.
+
+```{r}
+# Données de base
+mainData=as.data.frame(read.csv("https://www.data.gouv.fr/fr/datasets/r/63352e38-d353-4b54-bfd1-f1b3ee1cabd7", sep=";"))
+DataCotisDep=as.data.frame(read.csv("https://www.data.gouv.fr/en/datasets/r/8d497f12-d156-45ad-a794-30eff599325b", sep=",", dec=".", encoding = "UTF-8"))
+nbVaccinDep=as.data.frame(read.csv("https://www.data.gouv.fr/fr/datasets/r/7969c06d-848e-40cf-9c3c-21b5bd5a874b", sep=";", dec="."))
+```
+
+## Préparation et modélisation des données
+
+### Données de base
+
+Nous avons commencé par récupérer les sources de données concernant l’évolution du nombre de cas hospitalisés et du nombre de cas en réanimation à l’échelle du département publiées par Santé Public France sur le portail data.gouv.fr
+
+```{r}
+summary(mainData)
+```
+
+
+La colonne sexe présente les données par sexe (1 Femme, 2 Homme, 0 somme des deux). Pour les besoins de cette étude, Nous avons décidé de ne pas considérer cette différention.
+
+```{r}
+head(mainData)
+mainData=filter(mainData, sexe == 0)
+mainData = subset(mainData, select = -c(2,6:8))
+summary(mainData)
+```
+
+Le modèle Splinetree n'accepte pas les données de type date dans le modèle, il nous a fallu alors en plus ajouter une colonne date.num qui va représenter les données de Date (jour).
+
+```{r}
+# Calcul du nombre de NA dans les colonnes de la mainBase
+colSums(sapply(mainData,is.na))
+```
+
+Alors pour les données de base, on a créé une colonne de plus qui va présenter/remplacer la colonne Jour. On a fait un encodage de la colonne Jour par departement.
+
+```{r}
+str(mainData)
+```
+
+### Nombre de vaccination par département
+Nous avons ensuite récupéré les sources de données de vaccination à l’échelle du département.
+
+```{r}
+str(nbVaccinDep)
+```
+Suppression des colonne 6 et 7:
+Vérifier si on a des valeurs manquantes
+```{r}
+nbVaccinDep = subset(nbVaccinDep, select = -c(2,6,7))
+colSums(sapply(nbVaccinDep,is.na))
+```
+
+```{r}
+summary(nbVaccinDep)
+```
+
+### Fond de solidarité de santé par département
+#### Présentation des données
+
+Dans le contexte de l'épidémie de COVID-19, l’Etat a mis en place, avec les Régions, un fonds de solidarité doté d’1,7 milliard d’euros pour le mois de mars 2020 qui permettra le versement d’une aide défiscalisée allant jusqu’à 1500 euros aux plus petites entreprises, aux indépendants, aux micro-entrepreneurs et aux professions libérales touchés par la crise du coronavirus. Ce fonds sera maintenu autant que durera l’urgence sanitaire.
+
+Présentation des données:
+
+le nombre d'aides accordées ; le montant total des aides accordées en euros ; le secteur d'activité des entreprises bénéficiaires (via une section du code NAF). À ce jour, les données du volet 1 du fonds de solidarité sont disponibles.
+
+#### Préparation des données
+
+```{r}
+str(DataCotisDep)
+```
+
+On va s'nteresser ici seulement aux variables concernant le nombre et montant des aides accordées et plus précisement les aides liées à la santé.
+
+
+```{r}
+DataCotisDep = subset(DataCotisDep, select = -c(1,2,4,6,7,10))
+```
+
+```{r}
+str(nbVaccinDep)
+```
+
+Ce qui nous intéresse c'est que les montants des aides liés à la santé.
+
+```{r}
+DataCotisDep$libelle_section=as.factor(DataCotisDep$libelle_section)
+DataCotisSanteDep=filter(DataCotisDep,libelle_section  == "Santé humaine et action sociale")
+
+DataCotisSanteDep = subset(DataCotisSanteDep, select = -c(5))
+str(DataCotisSanteDep)
+```
+On vérifie si on a des valeurs manquantes
+```{r}
+colSums(sapply(mainData,is.na))
+```
+
+### Table de fait
+
+Dans cette section on va créer notre table de fait qui va présenter notre datamart. Cette table de fait va être utilisée dans la partie suivante, lié à la visualisation et au modèle splinetree. Les tables suivantes vont présenter les tables de base utilisé par la création de la table de fait.
+
+On vérifie la structure de nos table dans notre entrepot des données, cela va nous permettre de faire les jointures pour la création de la table de fait (datamart), sur laquelle on va se baser pour faire notre analyse et puis créer notre modèles des splineTree.
+
+```{r}
+str(mainData)
+```
+
+```{r}
+str(nbVaccinDep)
+```
+
+```{r}
+str(DataCotisSanteDep)
+```
+
+On s'interesse à enrichir les données de base (mainData) par les données budgétaire et les données liées à la vaccination.
+
+```{r}
+dataf= mainData %>% left_join(nbVaccinDep, by="dep")
+dataf= dataf %>% left_join(DataCotisSanteDep, by="dep")
+dataf=as.data.frame(dataf)
+str(dataf)
+```
+
+On vérifie finalement notre table de fait
+```{r}
+str(dataf)
+```
+
+Le modèle Splinetree ne peut lire que des données numériques, cette exigence est lié à la forme de la varible qui représente la dimension de date. Les fonctions - la variable quantitative par date - doivent être successive. Pour cela on va encoder la varibale date en numérique.
+
+```{r}
+#sorting des dep
+dataf=dataf[order(dataf$dep),]
+#Encoding de la variable date en numéric
+nbDate=nlevels(as.factor(dataf$jour))
+dataf$num.date = as.integer(rep(c(1:nbDate),101))
+```
+
+### Calcul des taux d'incidences par démartement (pour 100000 Habitants )
+
+Pour chaque variable dans notre table de base (mainData), Nous avons calculé leurs percentage par rapport chaque 100 000 habitant de la population des département. Ces percentages représentent les taux d'hospitalisation, réanimation, retour à domicile et de décès.
+
+Ces taux sont calculés de la manière suivante :  (100000 * mesure) / nombre d'habitants 
+
+```{r}
+# % measure pour 100000hab
+dataf$per.hosp = (dataf$hosp / dataf$pop) * 100000
+dataf$per.rea = (dataf$rea / dataf$pop) * 100000
+dataf$per.rad = (dataf$rad / dataf$pop) * 100000
+dataf$per.dc = (dataf$dc / dataf$pop) * 100000
+```
+
+On analyse nos données jusqu'à maintenant:
+```{r}
+summary(dataf)
+```
+
+Le fonction splineTree n'accepte pas que les variables explicatives suivent une variable de date. Pour cela on a décidé d'affecter à chaque département la valeur mediane et sa moyenne pour ces variables. Celà nous sera ensuite utile pour contruire le modèle Splinetree.
+
+```{r}
+m.rad=dataf %>%
+  group_by(dep) %>%
+  summarise_each(funs(median), rad)
+colnames(m.rad)=c("dep", "rad.median")
+
+m.dc=dataf %>%
+  group_by(dep) %>%
+  summarise_each(funs(median), dc)
+colnames(m.dc)=c("dep", "dc.median")
+
+m.hosp=dataf %>%
+  group_by(dep) %>%
+  summarise_each(funs(median), hosp)
+colnames(m.hosp)=c("dep", "hosp.median")
+
+m.pop=dataf %>%
+  group_by(dep) %>%
+  summarise_each(funs( median), pop)
+colnames(m.pop)=c("dep", "pop.median")
+
+m.nombre_aides=dataf %>%
+  group_by(dep) %>%
+  summarise_each(funs(median), nombre_aides)
+colnames(m.nombre_aides)=c("dep","nombre_aides.median")
+
+m.montant_total=dataf %>%
+  group_by(dep) %>%
+  summarise_each(funs(median), montant_total)
+colnames(m.montant_total)=c("dep","montant_total.median")
+
+m.n_tot_dose1=dataf %>%
+  group_by(dep) %>%
+  summarise_each(funs(median), n_tot_dose1)
+colnames(m.n_tot_dose1)=c("dep","n_tot_dose1.median")
+
+m.n_tot_dose2=dataf %>%
+  group_by(dep) %>%
+  summarise_each(funs(median), n_tot_dose2)
+colnames(m.n_tot_dose2)=c("dep","n_tot_dose2.median")
+```
+
+Maintenant on fusionne toutes les tables de moyenne et mediane à la table de fait principale.
+
+```{r}
+dataf= dataf %>% left_join(m.rad, by="dep")
+dataf= dataf %>% left_join(m.dc, by="dep")
+dataf= dataf %>% left_join(m.hosp, by="dep")
+dataf= dataf %>% left_join(m.pop, by="dep")
+dataf= dataf %>% left_join(m.nombre_aides, by="dep")
+dataf= dataf %>% left_join(m.montant_total, by="dep")
+dataf= dataf %>% left_join(m.n_tot_dose1, by="dep")
+dataf= dataf %>% left_join(m.n_tot_dose2, by="dep")
+
+dataf=as.data.frame(dataf)
+```
+
+Voici le résultat de notre table de fait.
+
+```{r}
+dataf$jour = as.Date(dataf$jour)
+str(dataf)
+```
+
+# Analyse et visualisation des données
+## Dashboarding and reporting
+
+Dans cette partie on s'interesse à visualiser nos variables dans le but d'avoir une idée sur les tendance, saisonalité des séries chronologique. On va utiliser le package ggplot avec Plotly qui donne plus de flexibilité à l'utilisateur de manipuler les graphes.
+Pour cela on a utilisé le package plotly en addition de ggploté qui va nous permettre de créer des graphiques intéractifs.
+
+Affichage de l'évolution des taux par département:
+### Evolution du taux d'hospitalisation pour chaque 100.000 Habitants
+```{r}
+
+### % hosp
+g.per.host <- ggplot(dataf, aes(x=jour, y=per.hosp)) +
+  geom_line(aes(color=dep)) + 
+  xlab("jour") + ylab("percentage d'hopitalisation pour chaque 100.000 Hab")
+
+g.per.host
+```
+
+### Evolution du taux des décès pour chaque 100.000 Habitants
+
+```{r}
+## % dc
+g.per.dc <- ggplot(dataf, aes(x=jour, y=per.dc)) +
+  geom_line(aes(color=dep)) + 
+  xlab("jour") + ylab("percentage de décès pour chaque 100.000 Hab")
+g.per.dc
+
+```
+
+### Evolution du taux de réanimation pour chaque 100.000 Habitants
+```{r}
+## % rea
+g.per.rea <- ggplot(dataf, aes(x=jour, y=per.rea)) +
+  geom_line(aes(color=dep)) + 
+  xlab("jour") + ylab("percentage de reanimation pour chaque 100.000 Hab")
+
+g.per.rea
+```
+### Evolution du taux de personnes rendu à domicile pour chaque 100.000 Habitants
+```{r}
+## % rad
+g.per.rad <- ggplot(dataf, aes(x=jour, y=per.rad)) +
+  geom_line(aes(color=dep)) + 
+  xlab("jour") + ylab("percentage de personne rendus à domicile pour chaque 100.000 Hab")
+
+g.per.rad
+```
+
+### Evolution du nombre de personne vaccinées (première dose)
+(TODO):  vérifier pourquoi les nombres sont pas correcte?
+```{r}
+## nombre de vaccination (1 dose)
+g.n_tot_dose1 <- ggplot(dataf, aes(x=jour, y=n_tot_dose1)) +
+  geom_line(aes(color=dep)) + 
+  xlab("jour") + ylab("Nombre de personne vaccinée (première dose)")
+
+g.n_tot_dose1
+```
+### Evolution du nombre de personne vaccinées (deux doses)
+
+```{r}
+## nombre de vaccination (2 doses)
+g.n_tot_dose2 <- ggplot(dataf, aes(x=jour, y=n_tot_dose2)) +
+  geom_line(aes(color=dep)) + 
+  xlab("jour") + ylab("Nombre de personne vaccinée (deux dose)")
+
+g.n_tot_dose2
+```
+
+### La population par département
+(TODO) vérifier comment corriger l'axe x:affichage des département en incliné
+```{r}
+## pop
+options( "scipen"=100)
+g.pop <- ggplot(dataf, aes(x=reorder(dep, -pop), y=pop)) +
+  geom_bar(stat='identity') + theme_minimal() + 
+  xlab("Département") + ylab("Population par département")
+
+g.pop
+```
+
+### Montant des aides d'état par département
+(TODO) vérifier comment corriger l'axe x:affichage des département en incliné
+```{r}
+#### Montant des aides
+options( "scipen"=100)
+g.montant_total = ggplot(dataf, aes(x = reorder(dep, -montant_total), y = montant_total)) +
+  geom_bar(stat='identity') + theme_minimal() + 
+  xlab("Département") + ylab("Montant des aides")
+
+g.montant_total
+```
+### Nombre des entrepises qui ont bénificiées de l'aide
+(TODO) vérifier comment corriger l'axe x:affichage des département en incliné
+```{r}
+## Nombre d'aides
+g.nombre_aides <- ggplot(dataf, aes(x = reorder(dep, -nombre_aides), y = nombre_aides)) +
+  geom_bar(stat='identity') + theme_minimal() + 
+  xlab("Département") + ylab("Nombre aides")
+g.nombre_aides
+
+```
+
+## ACP
+Le but de cette analyse est d'analyser les corréalation entre les variables dans le but de bien choisir les variables qui explique mieux les observation ainsi que éviter la rodondance des variables.
+
+### Réalisation de l'ACP
+Pour cela on s'interesse qu'aux données suivantes:
+```{r}
+active.dataf=dataf[,c(1,3:11,14:25)]
+active.dataf$dep=as.factor(active.dataf$dep)
+res.pca=PCA(active.dataf, quali.sup = 1, graph = FALSE)
+```
+### Affichage et analyse
+```{r}
+fviz_pca_biplot(res.pca)
+```
+Par rapport au axes, on remarque que seulement avec les deux premiers axes, on a déjà 82 d'intertie expliquée. Alors on va utiliser que ces deux axes pour notre analyse.
+
+On remarque qu'on a 4 classe d'observations (individus), en sachant que chaque observation est lié à un département. On peut dire donc qu'on a 4 classes de département.
+On remarque aussi qu'on des variables qui sont parfaitement corrélés.
+
+On remarque que les données en pourcentage sont fortement corrélés avec les variables en nombres. => on va utiliser les valeur en nombre dans notre modèles.
+```{r}
+fviz_pca_var(res.pca, repel = TRUE)
+```
+En analysant la carte des variables, on remarque qu'on a 3 classe de variables. La première qui montre une forte corrélation entre les variables hospitalière de la table de base en pourcentage. On trouve aussi une autre mais pour les données dont les valeurs sont en nombre. 
+La dernière classe contient les varibales enrichies liés à la vaccination, la population, les nombres des entreprises aidées, et le montant des cotisations pour chaque département.
+
+Pour analyser mieux les variables, on va afficher la carte des variables avec un filtre par rapport la contribution et l'explication des individus.
+```{r}
+fviz_pca_var(res.pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+```
+
+On remarque que les variables des tables d'enrichissement sont ceux qui contribuent dans la construction des axes (medianes des montants des cotisation, vaccination, population...). A cela s'ajoute aussi les variables de la table de base (nombre de décès, d'hospitalisation...) et leurs valeurs médiane pour chaque département. 
+Par contre la classe des variables qui contibue le moins est celle qui contient les pourcentages des variables pour chaque 100000 habitants.
+
+### Conclusion
+En analisant les graphes et les résultats d'ACP, on trouve qu'on peut pas expliquer s'il a un lien entre les classes des observations (individus) et les classes des variables.
+Alors on va essayer de classifier les observations qui présentent des données fonctionnelles par département en utilisant les classes des variables qui contribuent le plus dans notre système d'axe. On va nommer cette classe de varibales la classe "Omega".
+Pour cela il faut qu'on décompose les séries chronologiques en petits morceaux "Splines" pour qu'on puisse analiser les expliquer par les variables de la classe Omega. Cela va nous permettre aussi de classifier les départements et voir s'il a vraiment un lien entres les classes d'individus dans la classe d'ACP et les autres variables.
+
+# Modèle splinetree
+## Présentation du splinetree
+Les études longitudinales, où un résultat d'intérêt est mesuré à plusieurs reprises dans les mêmes sujets au fil du temps, jouent un rôle clé dans la recherche dans une variété de disciplines, y compris la médecine, l'épidémiologie et les sciences sociales. 
+
+Dans ces études, la trajectoire d'un résultat longitudinal au fil du temps peut être très différente selon les membres de la population.
+
+Il est souvent utile de trouver des facteurs qui aident à expliquer cette variation des modèles de croissance. 
+Nous proposons d'utiliser des arbres de régression longitudinale, en particulier un arbre splinéaire, pour trouver des sous-groupes de population où les membres du groupe suivent des modèles de trajectoire longitudinale similaires et partagent des valeurs de covariables de base communes. 
+
+Nous proposons également d'utiliser des forêts de splines pour comprendre quelles covariables de base peuvent expliquer la plus grande variation des trajectoires.
+
+Spline Tree représente chaque vecteur de réponse comme une combinaison linéaire de fonctions de base de spline, puis ajuste un arbre multivarié aux vecteurs de coefficients estimés.
+Pour construire un arbre, nous utilisons la fonction splineTree (). Il y a quatre paramètres dans splineTree qui n'ont pas de valeurs par défaut, et donc pour commencer, nous avons besoin (au minimum):
+
+Un ensemble de données longitudinales, à fournir via le paramètre data. L'ensemble de données doit être au format long, ce qui signifie qu'une ligne de données correspond à un sujet à un moment donné (contrairement au format large, où une ligne de données correspond à un sujet et différentes colonnes représentent des réponses à différents moments) . Pour notre premier ensemble de données, les données de base qu'on a nommé DataF, est au format long.
+
+Une trajectoire longitudinale ou une courbe fonctionnelle d'intérêt, à fournir via le paramètre tformula. Dans notre exemple, nous nous intéressons à la variable de réponse, Rea, en fonction de la variable de temps, Num.date. La trajectoire est donc définie par la formule Rea ~ Num.Date.
+
+Le nom d'une variable d'identificateur, qui étiquette les observations individuelles appartenant à la même trajectoire, est fourni sous forme de chaîne via le paramètre idvar. Dans notre exemple de données, le nom de la variable identifiant est «departements».
+
+Une formule de fractionnement unilatérale spécifiant les variables de fractionnement, à fournir via le paramètre splitformula. Toutes les variables fractionnées doivent être constantes de temps, ce qui signifie que pour une valeur donnée de la variable ID, chaque variable fractionnée ne prend qu'une seule valeur. Ce sont des variables dont nous soupçonnons qu'elles pourraient être liées à l'hétérogénéité des trajectoires de la population. Dans notre exemple, ce sont les variables covid de données de base sélectionnées comme rad.médian, pop.médian, dc.médian et hosp.médian.
+
+## Création du modèle Splinetree
+```{r}
+str(dataf)
+```
+
+Dans notre analyse on va essayer de classifier les départements en analysant au même temps l'impact sur le taux de réanimation. par exemple dans notre analyse on va essayer de répondre à la question suivante:
+On cosidérant qu'il nous manquent les observation de la réanimation durant la période de la deuxième vagues. Alors on va prédire la tendance de l'évolution de la rénaimsation pour ce département en utilisant les autres données / variables (taux hospitalisation, taux décès, cotisation, nombre d'aide...).
+L'analyse des données cosiste à analyser la corrélation et l'effet de chaque variables d'entrée sur la variable de réanimation. ainsi que classifier les département en coupant les courbes en petite parties (splines).
+
+Pour effectuer cette analyse on va expliquer l'evolution du taux de réanimation dans le temps par les médianes des variables d'entrée.
+
+```{r}
+# initialisation du modèle
+splitForm = ~ rad.median + pop.median + dc.median + hosp.median + nombre_aides.median + montant_total.median + 
+n_tot_dose1.median + n_tot_dose2.median
+
+tformula = rea ~ num.date
+idvar= 'dep'
+```
+Création du modèles de SplineTree.
+dans notre modèles on s'interesse à calculer l'intercept (beta zero) ainsi s'avoir la meilleur précision possible avec moins de classe.
+```{r}
+tree1 <- splineTree(splitForm, tformula, idvar, 
+                    dataf, degree=3,
+                    intercept=TRUE, cp=0.005)
+```
+## Interprétation des résultats
+### Interpréation statistique
+```{r}
+stPrint(tree1)
+```
+Nous notons que la taille de l'échantillon est n = 101 et le reste du résumé montre comment les données sont réparties.
+
+Premièrement, nous avons les 101 départements dans le nœud racine. Les quatre nombres suivants correspondent aux coefficients de spline moyens pour tous les départements (59.82808, -112.65180,-4.219700, -21.409420)
+
+Cet arbre utilise une base de spline cubique sans nœuds internes et sans interception. Cela donne à l'arbre 4 degrés de liberté (df = degré de polynôme + nombre de nœuds internes + intersection), et ainsi chaque nœud est décrit par quatre coefficients. Ces quatre coefficients, ainsi que des informations sur la base de spline utilisée, décrivent la trajectoire prédite pour chaque nœud.
+
+Ensuite, le nœud racine a été divisé par le nombre médian d’hospitalisation (87 départements avec < 372 et 14 départements avec ≥ 372).
+
+Ensuite, le groupe de 65 départements a été divisé en deux en fonction de la population (44 départements avec une population moins de 425781 et 21 départements avec plus de 425781).
+### Affichage des règles de décision (arbre de décision)
+```{r}
+stPlot(tree1)
+```
+
+Les nœuds terminaux (les feuilles de l'arbre) sont indiqués par un astérisque. Donc, ici, les nœuds 8, 9, 5 et 3 sont tous des nœuds terminaux qui n'ont pas été séparés en deux. Ce sont les groupes qui devraient avoir à la fois des schémas de trajectoires homogènes ainsi que des valeurs de covariables similaires qui se trouvent dans l'arbre (nombre d’hospitalisation et population);
+
+Ces nœuds terminaux et la trajectoire moyenne sont visualisés dans un graphique donné par la stPlot()fonction. L'arbre est visualisé à gauche et les trajectoires moyennes sont superposées à droite.
+
+### Analyse détaillée
+```{r}
+treeSummary(tree1)
+```
+Si nous nous intéressons particulièrement au nœud étiqueté nœud 3 par exemple, nous pouvons visualiser ses coefficients individuellement.
+Les coefficients décrivant directement chaque nœud :
+```{r}
+treeSummary(tree1)["3",]$coeffs
+```
+Comme, on peut également visualiser un résumé du nœud 3, y compris le chemin vers ce nœud et les coefficients.
+```{r}
+terminalNodeSummary(tree1, 3)
+```
+Nous savons maintenant quel sous-ensemble de données appartient au nœud 3 et nous avons quatre coefficients qui décrivent une trajectoire prédite pour ces individus. Il serait plus utile de voir un visuel de la trajectoire moyenne pour ce nœud.
+
+```{r}
+plotNode(tree1, node = 3, includeData = FALSE, estimateIntercept = FALSE)
+```
+
+## Prédiction et évaluation
+
+Maintenant que nous avons construit l'arbre, on peut se demander dans quelle mesure l'arbre explique la variation des trajectoires longitudinales. Pour cela, nous avons besoin de mesures de la performance des arbres. Une façon de définir les performances consiste à se concentrer sur les résidus ou les erreurs de prédiction. Cela ne peut être fait qu'avec un arbre avec une interception incluse.
+
+Pour commencer, nous pouvons faire des prédictions à partir de notre arbre sur un ensemble d'entraînement et voir dans quelle mesure les valeurs de REA prédites correspondent aux valeurs de REA réelles.
+(TODO) vérifier les prédictions
+```{r}
+#predictions <- predictY(tree1)
+#cor(predictions, dataf$rea)
+```
+
+La predictY()fonction permet également l'option de prédictions sur un ensemble de test distinct, et ainsi nous pourrions également mesurer les performances hors échantillon.
+
+```{r}
+#plot(predictions, (predictions - dataf$rea), xlab = "Predicted REA", ylab = "Residual")
+```
+
+Nous avons beaucoup plus de résidus négatifs que de résidus positifs. Le REA maximal dans l'ensemble de données est de 855, mais le REA maximal prévu n'est que de 230.
+
+En tant que mesure de la performance de nos arbres, nous pouvons également calculer un R2R2 mesure du pourcentage total de variation de réponse expliquée par notre arbre.
+
+```{r}
+#yR2(tree1)
+```
+
+# Modèle Spline Forests
+construire une forêt est simple. La majorité des paramètres nécessaires pour utiliser la fonction splineForest () sont identiques à ceux utilisés dans la fonction splineTree ().
+
+Le processus utilisé pour projeter les données longitudinales sur des trajectoires lissées puis effectuer des fractionnements est identique. Il n'y a que deux paramètres supplémentaires pour la fonction splineForest. Le paramètre nTree spécifie le nombre d'arbres dans la forêt. La valeur par défaut est 50. Les grandes forêts offrent une stabilité supplémentaire par rapport aux forêts plus petites, mais sur les grands ensembles de données, la création d'une grande forêt de splines peut prendre plusieurs minutes.
+
+Le paramètre prob spécifie la probabilité qu'une variable soit considérée comme une variable fractionnée à un nœud donné. Pour éviter une situation où aucune variable n'est prise en compte à un certain nœud, nous recommandons que ce prob soit relativement grand lorsque le nombre de variables fractionnées est petit.
+
+(TODO) ajouter plus des commentaires: expliquer la méthode d'apprentissage et d'itérations...
+```{r}
+forest <- splineForest(splitForm, tformula, idvar, 
+                       dataf, degree=1, df=3,
+                       intercept=TRUE,ntree=50, prob=0.5, cp=0.005)
+
+mean_coeffs <- apply(forest$flat_data$Ydata, 2, mean)
+
+times <- sort(unique(forest$data[[forest$tvar]]))
+
+
+basisMatrix <- bs(times, degree=forest$degree, Boundary.knots = forest$boundaryKnots, 
+                  knots = forest$innerKnots)
+if (forest$intercept) {
+  basisMatrix <- cbind(1, basisMatrix)
+}
+
+preds <- basisMatrix %*% mean_coeffs
+
+plot(times, preds, type='l', main="Reanimation Average Trajectory")
+stPrint(forest$Trees[[20]])
+```
+
+```{r}
+freqs <- table(forest$splits)/sum(table(forest$splits))
+par(las = 2)
+barplot(freqs, cex.names = 0.5)
+```
+
+Il peut être utile de comparer la fréquence de sélection des différentes variables. Il est important de noter que ces fréquences ne doivent pas être utilisées comme une métrique d'importance variable. Le graphique à barres ci-dessous montre que rad.median, pop.median, dc.median sont les variables les plus fréquemment sélectionnées dans toute la forêt.
+
+Ces trois variables sont les seules variables numériques de l'ensemble de données; les autres sont binaires, c'est-à-dire qu'elles ne peuvent jamais être utilisées consécutivement dans la même branche d'un arbre.
+
+Des mesures plus appropriées d'importance variable seront examinées ci-dessus.
+
+## Prédiction
+Lors de la prédiction des coefficients ou des réponses pour un point de données qui était dans l'ensemble d'apprentissage, nous avons la possibilité d'utiliser l'une des trois méthodes différentes, spécifiées par le paramètre «méthodes» dans predictYForestet predictCoeffsForest. 
+
+Pour un point de données donné, nous pouvons soit faire la moyenne de sa prédiction sur tous les arbres de la forêt ( method = "all"), sur uniquement les arbres de la forêt pour lesquels ce point de données n'était pas dans le sous-échantillon aléatoire ( method="oob"), soit sur uniquement les arbres de la forêt pour lesquels ce point de données était dans le sous-échantillon aléatoire ( method="itb"). 
+
+La oobméthode est préférée, car elle donne une impression de performances hors échantillon et évite de surappliquer les données d'apprentissage. Nous pouvons comparer les prédictions de réponse pour les méthodes arborescentes en fonction de leur degré de correspondance avec les réponses réelles. Comme prévu, leitb les prévisions correspondent beaucoup plus étroitement aux valeurs réelles.
+
+(TODO) vérifier les prédictions
+```{r}
+#cor(dataf$rea, predictYForest(forest, method="oob"))
+##[1] 0.7042923
+#cor(dataf$rea, predictYForest(forest, method="all"))
+##[1] 0.7510536
+#cor(dataf$rea, predictYForest(forest, method="itb"))
+##[1] 0.7673961
+#Evaluating a Forest
+#yR2Forest(forest, method="oob")
+## [1] 0.4879318
+#yR2Forest(forest, method="all")
+## [1] 0.5512813
+#yR2Forest(forest, method="itb")
+## [1]  0.5774052
+#projectedR2Forest(forest, method="oob", removeIntercept = FALSE)
+##           [,1]
+## [1,] 0.6414625
+#projectedR2Forest(forest, method="all", removeIntercept = FALSE)
+##           [,1]
+## [1,] 0.7367999
+#projectedR2Forest(forest, method="itb", removeIntercept = FALSE)
+##           [,1]
+## [1,]  0.7765417
+#projectedR2Forest(forest, method="oob", removeIntercept = TRUE)
+##            [,1]
+## [1,] 0.393377
+#projectedR2Forest(forest, method="all", removeIntercept = TRUE)
+##           [,1]
+## [1,] 0.4780249
+#projectedR2Forest(forest, method="itb", removeIntercept = TRUE)
+##            [,1]
+## [1,] 0.5152273
+```
+
+## Importances des variables
+```{r}
+Y_imps<- varImpY(forest, method="oob")
+Y_imps
+coeff_imps<- varImpCoeff(forest, method="oob", removeIntercept=FALSE)
+shape_imps<- varImpCoeff(forest, method="oob", removeIntercept=TRUE)
+par(mfrow=c(1,3))
+plotImp(Y_imps[,3], main="Response")
+plotImp(coeff_imps[,3], main = "Coeff w/ Intercept")
+plotImp(shape_imps[,3], main = "Coeff w/out Intercept")
+```
+
+# Conclution
+Les forêts splines sont des outils utiles pour comprendre quelles variables peuvent être associées à l'hétérogénéité des trajectoires longitudinales d'une population.
